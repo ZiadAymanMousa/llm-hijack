@@ -1,0 +1,33 @@
+[project]
+name = "hijack"
+version = "0.1.0"
+description = "Composing agent hardening and step-level guards against indirect prompt injection"
+requires-python = ">=3.10"
+dependencies = [
+    # AutoDojo's AgentDojo fork: AgentDojo + AgentDyn suites, Progent, adaptive attacks.
+    "agentdojo @ git+https://github.com/xhOwenMa/AutoDojo.git@aa458794b7eb7f082e94daeac4c0f55bfc0c90cc#subdirectory=agentdojo",
+    "openai>=1.59",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "statsmodels>=0.14",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+# Only needed to replay the wolf-defender-jev comparator guard.
+jev = ["torch>=2.4", "transformers>=4.51", "safetensors", "huggingface_hub"]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

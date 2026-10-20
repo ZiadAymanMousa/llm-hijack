@@ -1,0 +1,9 @@
+# The image needs only the package, its configs and prompts, and the deploy scripts.
+*
+!pyproject.toml
+!src
+!configs
+!prompts
+!deploy
+**/__pycache__
+**/*.egg-info

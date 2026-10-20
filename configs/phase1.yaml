@@ -1,0 +1,97 @@
+# Phase 1: pipeline and fixed-attack baseline.
+# Every model is served by its own vLLM server (see deploy/serve.sh); `url` is that server.
+
+results_dir: results/phase1
+benchmark_version: v1.2.2
+attack: important_instructions
+
+models:
+  base:
+    hf_id: Qwen/Qwen3-4B-Instruct-2507
+    revision: cdbee75f17c01a7cc42f958dc650907174af0554
+    url: http://localhost:8000/v1
+  reta:
+    hf_id: ttttonyhe/Qwen3-4B-Instruct-RETA
+    revision: 91b41fe9f78c8b4735943d012f437c32ed051d24
+    url: http://localhost:8001/v1
+  stepguard:
+    hf_id: ninty-seven/StepGuard
+    revision: c7e4a2c9c34c09efbba0e66a6b802e08b4384662
+    url: http://localhost:8002/v1
+  metasecalign:
+    hf_id: ttttonyhe/Qwen3-4B-Instruct-MetaSecAlign
+    revision: 183db816deaec78cfe883c5d659a009e97c616ca
+    url: http://localhost:8003/v1
+    chat_template: chat_template.jinja   # renders the `input` role
+
+# How each agent is prompted.
+#   prompt: reta      -> RETA's tool-calling prompt + trust-boundary section
+#   prompt: agentdojo -> AgentDojo's default local-model prompt (no trust boundary)
+#   tool_result_role  -> chat role that carries tool outputs back to the agent
+agents:
+  base:          {model: base, prompt: reta, tool_result_role: user}
+  reta:          {model: reta, prompt: reta, tool_result_role: user}
+  base_default:  {model: base, prompt: agentdojo, tool_result_role: user}
+  metasecalign:  {model: metasecalign, prompt: reta, tool_result_role: input}
+
+# Guards. `view` is what the guard sees: full (StepGuard native) or restricted (§4.2–4.3).
+guards:
+  stepguard_full:       {type: llm, model: stepguard, view: full}
+  stepguard_restricted: {type: llm, model: stepguard, view: restricted}
+  base_full:            {type: llm, model: base, view: full}         # G0
+  base_restricted:      {type: llm, model: base, view: restricted}   # G0
+  wolf_jev:
+    type: wolf_jev
+    hf_id: patronus-studio/wolf-defender-jev
+    revision: 5ed7c44d8ee16b0c517952ad58e264e00ec7bbac
+
+# Live arms. Guard-only comparators (G0, J) are scored by replay, not listed here.
+arms:
+  A:  {agent: base}
+  B:  {agent: reta}
+  C:  {agent: base, guard: stepguard_restricted}
+  D:  {agent: reta, guard: stepguard_restricted}
+  E:  {agent: base, guard: stepguard_full}
+  F:  {agent: reta, guard: stepguard_full}
+  A0: {agent: base_default}
+  M:  {agent: metasecalign}
+  P:  {agent: base, defense: progent}
+
+benchmarks:
+  agentdojo: [workspace, travel, banking, slack]
+  agentdyn:  [shopping, github, dailylife]
+
+# Progent (arm P) writes its least-privilege policy with this model.
+progent:
+  policy_url: http://localhost:8000/v1
+  policy_model: base
+
+# The user's own details in each suite. The masker keeps these as trusted values.
+trusted_constants:
+  workspace: [emma.johnson@bluesparrowtech.com, Emma Johnson]
+  travel:    [emma.johnson@bluesparrowtech.com, Emma Johnson]
+  banking:   [DE89370400440532013000, Emma Johnson]
+  slack:     [Emma]
+  shopping:  [emma.johnson@bluesparrowtech.com, Emma Johnson, emmajohnson, SE5902959058]
+  github:    [emma.johnson@bluesparrowtech.com, Emma Johnson, emmajohnson, SE5902959058]
+  dailylife: [emma.johnson@bluesparrowtech.com, Emma Johnson, emmajohnson, SE5902959058]
+
+masking:
+  min_substring: 12
+
+decoding:
+  agent_max_tokens: 2048
+  guard_max_tokens: 1024
+  max_tool_iterations: 15
+
+block_message: "This action was blocked by a security check. Continue the user's task without it."
+
+sep:
+  url: https://raw.githubusercontent.com/egozverev/Shold-It-Be-Executed-Or-Processed/7606c0696f20f5aa433169fd2221f76852d1d4f5/SEP_dataset/SEP_dataset.json
+  sha256: 9f81a52ba089073251793f8499fbb79bb4112e94cf48d31b7f8805e8b44fa3ce
+  path: data/SEP_dataset.json
+  n_items: 1000
+  seed: 0
+
+# Share of user tasks held out to set thresholds for score-based guards (wolf-defender-jev).
+validation_fraction: 0.2

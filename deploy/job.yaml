@@ -1,0 +1,33 @@
+# Azure Container Apps job for Phase 1 (serverless A100). Placeholders ${...} are filled by azure_setup.sh.
+location: ${LOCATION}
+properties:
+  environmentId: ${ENV_ID}
+  workloadProfileName: gpu-a100
+  configuration:
+    triggerType: Manual
+    replicaTimeout: 86400
+    replicaRetryLimit: 0
+    manualTriggerConfig:
+      parallelism: 1
+      replicaCompletionCount: 1
+    registries:
+      - server: ${ACR}.azurecr.io
+        username: ${ACR_USER}
+        passwordSecretRef: acr-password
+    secrets:
+      - name: acr-password
+        value: ${ACR_PASSWORD}
+  template:
+    containers:
+      - name: phase1
+        image: ${ACR}.azurecr.io/hijack:phase1
+        resources:
+          cpu: 24
+          memory: 220Gi
+        volumeMounts:
+          - volumeName: results
+            mountPath: /app/results
+    volumes:
+      - name: results
+        storageType: AzureFile
+        storageName: results
