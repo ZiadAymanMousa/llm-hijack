@@ -10,7 +10,9 @@ COPY src ./src
 COPY configs ./configs
 COPY prompts ./prompts
 COPY deploy ./deploy
-RUN pip install --no-cache-dir .
+# Editable install: the package finds configs/ and prompts/ next to src/ in /app.
+RUN pip install --no-cache-dir -e . \
+    && python3 -c "import hijack.run, hijack.replay, hijack.analyze; from hijack.views import STEPGUARD_TEMPLATE"
 
 # Results (and the Hugging Face cache) live on the mounted Azure Files share.
 ENV PYTHONUNBUFFERED=1 \
