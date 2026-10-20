@@ -21,6 +21,8 @@ The job runs one container on an A100 80GB (Azure Container Apps, workload profi
    ACR=<unique-registry-name> STORAGE=<unique-storage-name> bash deploy/azure_setup.sh
    ```
 
+   This creates the resources, then runs `deploy/azure_job.sh`, which creates (or updates) the job and starts it. To change the job or start it again later, run only `bash deploy/azure_job.sh` (`START=0` creates or updates without starting). If the code changed, rebuild the image first with `az acr build -r <registry> -t hijack:phase1 -f deploy/Dockerfile .`
+
 3. Follow the logs:
 
    ```bash
