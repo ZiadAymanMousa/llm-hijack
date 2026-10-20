@@ -121,6 +121,38 @@ def test_goal_values_without_ground_truth():
         "jane@x.com", "Hi there"}
 
 
+def outcomes(path):
+    return {r["case_id"]: (r["utility"], r["attack_success"], r["payload_delivered"],
+                           [(p["function"], p["unsafe"], p["blocked"]) for p in r["proposals"]])
+            for r in read_jsonl(path)}
+
+
+def test_parallel_run_matches_sequential(cfg, fake_servers, tmp_path, monkeypatch):
+    results = {}
+    for workers in (1, 4):
+        folder = tmp_path / f"w{workers}"
+        monkeypatch.setattr(type(cfg), "results_dir", property(lambda self, f=folder: f))
+        run_arm(cfg, "E", "agentdojo", ["banking"], limit=3, clean_only=False, workers=workers)
+        results[workers] = outcomes(folder / "agentdojo" / "E.jsonl")
+    assert len(results[1]) == 3 * (1 + len(get_suites("v1.2.2")["banking"].injection_tasks))
+    assert results[1] == results[4]
+    assert {r["workers"] for r in read_jsonl(tmp_path / "w4" / "agentdojo" / "E.jsonl")} == {4}
+
+
+def test_parallel_replay_scores_every_call_once(cfg, fake_servers, tmp_path, monkeypatch):
+    from hijack.replay import replay
+
+    monkeypatch.setattr(type(cfg), "results_dir", property(lambda self: tmp_path))
+    run_arm(cfg, "A", "agentdojo", ["banking"], limit=2, clean_only=False, workers=4)
+    calls = sum(len(r["proposals"]) for r in read_jsonl(tmp_path / "agentdojo" / "A.jsonl"))
+    replay(cfg, "stepguard_full", ["A"], "agentdojo", None, workers=8)
+    rows = read_jsonl(tmp_path / "agentdojo" / "replay" / "stepguard_full.jsonl")
+    assert len(rows) == calls == len({r["key"] for r in rows})
+    assert all(r["blocked"] == r["unsafe"] for r in rows)  # the scripted guard blocks exactly the attack calls
+    replay(cfg, "stepguard_full", ["A"], "agentdojo", None, workers=8)  # resumes: nothing new
+    assert len(read_jsonl(tmp_path / "agentdojo" / "replay" / "stepguard_full.jsonl")) == calls
+
+
 def test_run_arm_writes_and_resumes(cfg, fake_servers, tmp_path, monkeypatch):
     cfg.raw["results_dir"] = str(tmp_path)
     monkeypatch.setattr(type(cfg), "results_dir", property(lambda self: tmp_path))

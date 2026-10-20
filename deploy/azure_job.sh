@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Create (or update) the Phase 1 job from deploy/job.yaml and start it.
-#   bash deploy/azure_job.sh             # create/update and start
-#   START=0 bash deploy/azure_job.sh     # create/update only
+#   bash deploy/azure_job.sh                          # create/update and start
+#   START=0 bash deploy/azure_job.sh                  # create/update only
+#   IMAGE_TAG=phase1-parallel START=0 bash deploy/azure_job.sh   # switch the image for the next start
+# Updating the job does not touch an execution that is already running.
 # Values are filled into the template in bash itself: Git Bash on Windows rewrites
 # environment values that look like paths (such as Azure resource IDs) for other programs.
 set -euo pipefail
@@ -10,6 +12,7 @@ RG=${RG:-hijack-research}
 LOCATION=${LOCATION:-uksouth}
 ENV=${ENV:-hijack-env}
 JOB=${JOB:-hijack-phase1}
+IMAGE_TAG=${IMAGE_TAG:-phase1}
 START=${START:-1}
 
 tsv() { az "$@" -o tsv 2>/dev/null | tr -d '\r'; }   # az output without Windows line endings
@@ -23,7 +26,7 @@ for name in ACR ENV_ID ACR_USER ACR_PASSWORD; do
 done
 
 yaml=$(<deploy/job.yaml)
-for name in LOCATION ENV_ID ACR ACR_USER ACR_PASSWORD; do
+for name in LOCATION ENV_ID ACR ACR_USER ACR_PASSWORD IMAGE_TAG; do
   yaml=${yaml//"\${$name}"/"${!name}"}
 done
 JOB_YAML=$(mktemp)

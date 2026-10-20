@@ -21,7 +21,14 @@ The job runs one container on an A100 80GB (Azure Container Apps, workload profi
    ACR=<unique-registry-name> STORAGE=<unique-storage-name> bash deploy/azure_setup.sh
    ```
 
-   This creates the resources, then runs `deploy/azure_job.sh`, which creates (or updates) the job and starts it. To change the job or start it again later, run only `bash deploy/azure_job.sh` (`START=0` creates or updates without starting). If the code changed, rebuild the image first with `az acr build -r <registry> -t hijack:phase1 -f deploy/Dockerfile .`
+   This creates the resources, then runs `deploy/azure_job.sh`, which creates (or updates) the job and starts it. To change the job or start it again later, run only `bash deploy/azure_job.sh` (`START=0` creates or updates without starting). If the code changed, build a new image tag and point the job at it; a running execution is not affected:
+
+   ```bash
+   az acr build -r <registry> -t hijack:<new-tag> -f deploy/Dockerfile . --no-logs
+   IMAGE_TAG=<new-tag> START=0 bash deploy/azure_job.sh
+   ```
+
+   (`--no-logs` avoids an Azure CLI crash on Windows when it prints the build log; follow the build with `az acr task list-runs -r <registry> -o table`.)
 
 3. Follow the logs:
 
@@ -31,7 +38,9 @@ The job runs one container on an A100 80GB (Azure Container Apps, workload profi
 
 4. When the job finishes, download `phase1/report/` from the `results` share (Azure Portal → Storage account → File shares, or `az storage file download-batch`).
 
-A stopped or failed job can be started again with `az containerapp job start -g hijack-research -n hijack-phase1`; every step resumes from the results already on the share.
+A stopped or failed job can be started again with `az containerapp job start -g hijack-research -n hijack-phase1`; every step resumes from the results already on the share. One execution may run for at most 24 hours (`replicaTimeout`), so a long phase can need a restart.
+
+Episodes, SEP probes and guard replay run concurrently against the vLLM servers (`parallel` in `configs/phase1.yaml`); arm P and the wolf-defender-jev guard run one at a time.
 
 ## Running pieces by hand
 

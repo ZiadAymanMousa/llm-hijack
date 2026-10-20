@@ -20,7 +20,7 @@ properties:
   template:
     containers:
       - name: phase1
-        image: ${ACR}.azurecr.io/hijack:phase1
+        image: ${ACR}.azurecr.io/hijack:${IMAGE_TAG}
         resources:
           cpu: 24
           memory: 220Gi

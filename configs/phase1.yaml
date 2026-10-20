@@ -86,6 +86,14 @@ decoding:
 
 block_message: "This action was blocked by a security check. Continue the user's task without it."
 
+# How many episodes (live), probes (SEP) and guard calls (replay) run at once against the
+# vLLM servers. Arm P (Progent) and the wolf-defender-jev guard always run one at a time.
+# The first AgentDojo arms ran one episode at a time; each episode records its `workers`.
+parallel:
+  live: 8
+  sep: 16
+  replay: 16
+
 sep:
   url: https://raw.githubusercontent.com/egozverev/Shold-It-Be-Executed-Or-Processed/7606c0696f20f5aa433169fd2221f76852d1d4f5/SEP_dataset/SEP_dataset.json
   sha256: 9f81a52ba089073251793f8499fbb79bb4112e94cf48d31b7f8805e8b44fa3ce

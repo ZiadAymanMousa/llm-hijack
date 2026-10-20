@@ -17,7 +17,8 @@ az extension add --name containerapp --upgrade --only-show-errors
 echo "== resource group, registry, image"
 az group create -n "$RG" -l "$LOCATION" -o none
 az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled true -o none
-az acr build -r "$ACR" -t hijack:phase1 -f deploy/Dockerfile .
+IMAGE_TAG=${IMAGE_TAG:-phase1}
+az acr build -r "$ACR" -t "hijack:$IMAGE_TAG" -f deploy/Dockerfile . --no-logs
 
 echo "== results share"
 az storage account create -g "$RG" -n "$STORAGE" -l "$LOCATION" --sku Standard_LRS --kind StorageV2 -o none
@@ -33,4 +34,4 @@ az containerapp env storage set -g "$RG" -n "$ENV" --storage-name results \
   --azure-file-share-name results --access-mode ReadWrite -o none
 
 echo "== job"
-RG=$RG LOCATION=$LOCATION ENV=$ENV ACR=$ACR JOB=$JOB bash deploy/azure_job.sh
+RG=$RG LOCATION=$LOCATION ENV=$ENV ACR=$ACR JOB=$JOB IMAGE_TAG=$IMAGE_TAG bash deploy/azure_job.sh

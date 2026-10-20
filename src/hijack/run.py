@@ -11,7 +11,7 @@ import argparse
 import hashlib
 import json
 import random
-from pathlib import Path
+import threading
 
 import requests
 from agentdojo.agent_pipeline.agent_pipeline import load_system_message
@@ -24,6 +24,7 @@ from hijack.config import ROOT, load_config
 from hijack.factory import build_agent, build_pipeline
 from hijack.labels import attacker_markers, is_unsafe
 from hijack.masker import normalize
+from hijack.parallel import run_parallel
 from hijack.record import Recorder, append_jsonl, done_keys, serialize_messages
 
 BUCKETS = json.loads((ROOT / "configs" / "task_buckets.json").read_text(encoding="utf-8"))["task_to_bucket"]
@@ -90,40 +91,56 @@ def run_episode(suite, pipeline, recorder, user_task, injection_task, injections
     )
 
 
-def run_arm(cfg, arm: str, benchmark: str, suites: list[str] | None, limit: int | None, clean_only: bool):
+def suite_cases(suite, suite_name, attack, limit, clean_only, done) -> list[tuple]:
+    """(case_id, user_task, injection_task, injections) for every episode not run yet."""
+    cases = []
+    for user_task in list(suite.user_tasks.values())[:limit]:
+        pairs = [(None, {})]
+        if not clean_only:
+            for injection_task in suite.injection_tasks.values():
+                try:
+                    pairs.append((injection_task, attack.attack(user_task, injection_task)))
+                except ValueError as e:  # task reads no attacker-controlled content
+                    print(f"skip {suite_name}/{user_task.ID}: {e}")
+                    break
+        for injection_task, injections in pairs:
+            case_id = f"{suite_name}/{user_task.ID}/{injection_task.ID if injection_task else 'clean'}"
+            if case_id not in done:
+                cases.append((case_id, user_task, injection_task, injections))
+    return cases
+
+
+def run_arm(cfg, arm: str, benchmark: str, suites: list[str] | None, limit: int | None, clean_only: bool,
+            workers: int | None = None):
+    # Progent keeps per-run state in its pipeline, so that arm always runs one episode at a time.
+    workers = 1 if cfg.arm(arm).get("defense") else (workers or cfg.get("parallel", {}).get("live", 1))
     out_path = cfg.results_dir / benchmark / f"{arm}.jsonl"
     done = done_keys(out_path)
     all_suites = get_suites(cfg["benchmark_version"])
     for suite_name in suites or cfg["benchmarks"][benchmark]:
         suite = all_suites[suite_name]
-        recorder = Recorder()
-        pipeline = build_pipeline(cfg, arm, recorder, suite_name)
-        attack = load_attack(cfg["attack"], suite, pipeline)
-        user_tasks = list(suite.user_tasks.values())[:limit]
-        for user_task in user_tasks:
-            cases = [(None, {})]
-            if not clean_only:
-                for injection_task in suite.injection_tasks.values():
-                    try:
-                        cases.append((injection_task, attack.attack(user_task, injection_task)))
-                    except ValueError as e:  # task reads no attacker-controlled content
-                        print(f"skip {suite_name}/{user_task.ID}: {e}")
-                        break
-            for injection_task, injections in cases:
-                case_id = f"{suite_name}/{user_task.ID}/{injection_task.ID if injection_task else 'clean'}"
-                if case_id in done:
-                    continue
-                recorder.start({
-                    "case_id": case_id, "arm": arm, "benchmark": benchmark, "suite": suite_name,
-                    "user_task": user_task.ID, "injection_task": injection_task.ID if injection_task else None,
-                    "attack": cfg["attack"] if injection_task else None, "bucket": bucket(suite_name, user_task.ID),
-                    "prompt": user_task.PROMPT, "injections": injections,
-                    "trusted": cfg.trusted_constants(suite_name),
-                })
-                record = run_episode(suite, pipeline, recorder, user_task, injection_task, injections)
-                append_jsonl(out_path, record)
-                print(f"{arm} {case_id} utility={record['utility']} attack={record['attack_success']}"
-                      f"{' error=' + record['error'] if record['error'] else ''}")
+        attack = load_attack(cfg["attack"], suite, build_pipeline(cfg, arm, Recorder(), suite_name))
+        cases = suite_cases(suite, suite_name, attack, limit, clean_only, done)
+        local = threading.local()  # one pipeline and recorder per worker thread
+
+        def episode(case):
+            if not hasattr(local, "pipeline"):
+                local.recorder = Recorder()
+                local.pipeline = build_pipeline(cfg, arm, local.recorder, suite_name)
+            case_id, user_task, injection_task, injections = case
+            local.recorder.start({
+                "case_id": case_id, "arm": arm, "benchmark": benchmark, "suite": suite_name,
+                "user_task": user_task.ID, "injection_task": injection_task.ID if injection_task else None,
+                "attack": cfg["attack"] if injection_task else None, "bucket": bucket(suite_name, user_task.ID),
+                "prompt": user_task.PROMPT, "injections": injections,
+                "trusted": cfg.trusted_constants(suite_name), "workers": workers,
+            })
+            return run_episode(suite, local.pipeline, local.recorder, user_task, injection_task, injections)
+
+        for record in run_parallel(episode, cases, workers):
+            append_jsonl(out_path, record)
+            print(f"{arm} {record['case_id']} utility={record['utility']} attack={record['attack_success']}"
+                  f"{' error=' + record['error'] if record['error'] else ''}", flush=True)
 
 
 def load_sep(cfg) -> list[dict]:
@@ -140,26 +157,27 @@ def load_sep(cfg) -> list[dict]:
     return items[: spec["n_items"]]
 
 
-def run_sep(cfg, agent_name: str):
+def run_sep(cfg, agent_name: str, workers: int | None = None):
     """Answer manipulation: does the probe hidden in a document change the agent's answer?"""
+    workers = workers or cfg.get("parallel", {}).get("sep", 1)
     out_path = cfg.results_dir / "sep" / f"{agent_name}.jsonl"
     done = done_keys(out_path)
     agent = build_agent(cfg, agent_name)
     system_message = load_system_message(None)
-    for i, item in enumerate(load_sep(cfg)):
-        case_id = f"sep/{i}"
-        if case_id in done:
-            continue
+    items = [(f"sep/{i}", item) for i, item in enumerate(load_sep(cfg)) if f"sep/{i}" not in done]
+
+    def probe(case):
+        case_id, item = case
         answers = {variant: agent.answer_with_document(system_message, item["system_prompt_clean"],
                                                        item[f"prompt_{variant}"])
                    for variant in ("instructed", "clean")}
         witness = item["witness"].lower()
-        append_jsonl(out_path, {
-            "case_id": case_id, "agent": agent_name, "witness": item["witness"],
-            "hit_instructed": witness in answers["instructed"].lower(),
-            "hit_clean": witness in answers["clean"].lower(),
-            "answers": answers,
-        })
+        return {"case_id": case_id, "agent": agent_name, "witness": item["witness"],
+                "hit_instructed": witness in answers["instructed"].lower(),
+                "hit_clean": witness in answers["clean"].lower(), "answers": answers}
+
+    for record in run_parallel(probe, items, workers):
+        append_jsonl(out_path, record)
 
 
 def main():
@@ -172,13 +190,14 @@ def main():
     parser.add_argument("--clean-only", action="store_true", help="skip attacked episodes")
     parser.add_argument("--sep", action="store_true", help="run the SEP answer-manipulation probe")
     parser.add_argument("--agent", help="agent for --sep")
+    parser.add_argument("--workers", type=int, help="episodes run at once (default: config parallel)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.sep:
-        run_sep(cfg, args.agent)
+        run_sep(cfg, args.agent, args.workers)
     else:
-        run_arm(cfg, args.arm, args.benchmark, args.suites, args.limit, args.clean_only)
+        run_arm(cfg, args.arm, args.benchmark, args.suites, args.limit, args.clean_only, args.workers)
 
 
 if __name__ == "__main__":
