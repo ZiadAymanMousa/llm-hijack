@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 1 end to end: serve models, smoke test, live arms, held-out check, SEP, replay, analysis.
+# Phase 1 end to end: serve models, smoke test, live arms, held-out check, SEP, replay, repeat runs, analysis.
 # Every step resumes from what is already in results/, so re-running the job continues a stopped run.
 set -euo pipefail
 cd /app
@@ -34,6 +34,13 @@ echo "== guards scored on logged calls"
 for benchmark in agentdojo agentdyn; do
   for guard in stepguard_full stepguard_restricted base_full base_restricted wolf_jev; do
     $REPLAY --guard "$guard" --sources A B --benchmark "$benchmark"
+  done
+done
+
+echo "== repeat runs (run-to-run variance)"
+for repeat in 2 3; do
+  for arm in A F; do
+    $RUN --arm "$arm" --benchmark agentdojo --repeat "$repeat"
   done
 done
 

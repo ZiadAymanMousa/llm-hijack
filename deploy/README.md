@@ -42,6 +42,8 @@ A stopped or failed job can be started again with `az containerapp job start -g 
 
 Episodes, SEP probes and guard replay run concurrently against the vLLM servers (`parallel` in `configs/phase1.yaml`); arm P and the wolf-defender-jev guard run one at a time.
 
+After the replay, the job repeats arms A and F on AgentDojo twice (`--repeat 2`, `--repeat 3`, written to `agentdojo/repeats/`) to measure run-to-run variance. On a share where the rest of Phase 1 is already complete, starting the job again runs only the repeats and the analysis.
+
 ## Running pieces by hand
 
 Inside the container (or on any Linux machine with one 80GB GPU):

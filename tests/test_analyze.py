@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from hijack.analyze import calibrate, cluster_rate, holm, interaction, paired_contrast
+from hijack.analyze import calibrate, cluster_rate, holm, interaction, paired_contrast, repeat_metrics
 
 
 def synthetic(n_tasks=60, per_task=8, seed=0):
@@ -45,3 +45,16 @@ def test_calibrate_threshold_on_validation_split():
     test, threshold = calibrate(rows, fraction=0.2)
     assert 0.1 < threshold <= 0.9
     assert (test["blocked"] == test["unsafe"]).all()
+
+
+def test_repeat_metrics_pairs_runs_on_the_same_cases():
+    df = synthetic()
+    main = df[df.arm == "A"].assign(benchmark="agentdojo", error=False, workers=1)
+    flipped = main["case_id"].isin(main["case_id"].iloc[:48])  # 10% of cases change outcome
+    repeat = main.assign(run=2, workers=8, attack=main["attack"] ^ flipped)
+    runs, pairs = repeat_metrics(main, repeat, n_boot=200)
+    assert list(runs["run"]) == [1, 2] and list(runs["workers"]) == [1, 8]
+    p = pairs.iloc[0]
+    assert p["runs"] == "2 vs 1" and p["cases"] == len(main)
+    assert abs(p["same_outcome"] - 0.9) < 1e-9
+    assert abs(p["ASR_diff"] - (repeat["attack"].mean() - main["attack"].mean())) < 1e-9

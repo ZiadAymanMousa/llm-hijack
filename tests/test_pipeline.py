@@ -163,3 +163,12 @@ def test_run_arm_writes_and_resumes(cfg, fake_servers, tmp_path, monkeypatch):
     assert first[0]["injection_task"] is None and first[0]["bucket"] == "param-open"
     run_arm(cfg, "A", "agentdojo", ["banking"], limit=1, clean_only=False)
     assert len(read_jsonl(path)) == len(first)  # nothing re-run
+
+
+def test_repeat_run_writes_its_own_file(cfg, fake_servers, tmp_path, monkeypatch):
+    monkeypatch.setattr(type(cfg), "results_dir", property(lambda self: tmp_path))
+    run_arm(cfg, "A", "agentdojo", ["banking"], limit=1, clean_only=False, repeat=2)
+    rows = read_jsonl(tmp_path / "agentdojo" / "repeats" / "A_r2.jsonl")
+    assert len(rows) == 1 + len(get_suites("v1.2.2")["banking"].injection_tasks)
+    assert {r["repeat"] for r in rows} == {2}
+    assert not (tmp_path / "agentdojo" / "A.jsonl").exists()  # the main run is untouched

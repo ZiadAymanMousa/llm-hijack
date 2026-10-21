@@ -2,12 +2,13 @@
 
     python -m hijack.analyze --config configs/phase1.yaml --out reports/phase1
 
-Reads <results_dir>/<benchmark>/<arm>.jsonl, replay/*.jsonl and sep/*.jsonl.
+Reads <results_dir>/<benchmark>/<arm>.jsonl, repeats/*.jsonl, replay/*.jsonl and sep/*.jsonl.
 Writes CSV tables, summary.md and two figures to --out.
 """
 
 import argparse
 import hashlib
+import itertools
 import warnings
 from pathlib import Path
 
@@ -23,24 +24,28 @@ CONTENT_DEPENDENT = {"param-open", "action-open"}
 
 # ---------------------------------------------------------------- loading
 
+def episode_row(benchmark: str, arm: str, spec: dict, ep: dict) -> dict:
+    parse_fail = any("<function" in m["text"] and not m.get("tool_calls")
+                     for m in ep["messages"] if m["role"] == "assistant")
+    return {
+        "benchmark": benchmark, "arm": arm, "agent": spec["agent"], "guard": spec.get("guard"),
+        "defense": spec.get("defense"), "case_id": ep["case_id"], "suite": ep["suite"],
+        "cluster": f"{ep['suite']}/{ep['user_task']}", "bucket": ep["bucket"],
+        "attacked": ep["injection_task"] is not None, "utility": ep["utility"],
+        "attack": bool(ep["attack_success"]), "delivered": bool(ep["payload_delivered"]),
+        "error": ep["error"] is not None, "parse_fail": parse_fail, "seconds": ep["seconds"],
+        "unsafe_proposed": any(p.get("unsafe") for p in ep["proposals"]),
+        "labelable": ep.get("labelable", True), "workers": ep.get("workers") or 1,
+    }
+
+
 def load_episodes(cfg) -> tuple[pd.DataFrame, pd.DataFrame]:
     episodes, proposals = [], []
     for benchmark in cfg["benchmarks"]:
         for arm, spec in cfg["arms"].items():
             for ep in read_jsonl(cfg.results_dir / benchmark / f"{arm}.jsonl"):
                 props = ep["proposals"]
-                parse_fail = any("<function" in m["text"] and not m.get("tool_calls")
-                                 for m in ep["messages"] if m["role"] == "assistant")
-                episodes.append({
-                    "benchmark": benchmark, "arm": arm, "agent": spec["agent"], "guard": spec.get("guard"),
-                    "defense": spec.get("defense"), "case_id": ep["case_id"], "suite": ep["suite"],
-                    "cluster": f"{ep['suite']}/{ep['user_task']}", "bucket": ep["bucket"],
-                    "attacked": ep["injection_task"] is not None, "utility": ep["utility"],
-                    "attack": bool(ep["attack_success"]), "delivered": bool(ep["payload_delivered"]),
-                    "error": ep["error"] is not None, "parse_fail": parse_fail, "seconds": ep["seconds"],
-                    "unsafe_proposed": any(p.get("unsafe") for p in props),
-                    "labelable": ep.get("labelable", True),
-                })
+                episodes.append(episode_row(benchmark, arm, spec, ep))
                 for p in props:
                     proposals.append({
                         "benchmark": benchmark, "arm": arm, "case_id": ep["case_id"],
@@ -52,6 +57,16 @@ def load_episodes(cfg) -> tuple[pd.DataFrame, pd.DataFrame]:
                         "mask_leak": bool(p.get("mask_leak")),
                     })
     return pd.DataFrame(episodes), pd.DataFrame(proposals)
+
+
+def load_repeats(cfg) -> pd.DataFrame:
+    """Episodes of the repeat runs (<benchmark>/repeats/<arm>_r<N>.jsonl), with their run number."""
+    rows = []
+    for benchmark in cfg["benchmarks"]:
+        for path in sorted((cfg.results_dir / benchmark / "repeats").glob("*_r*.jsonl")):
+            arm, run = path.stem.rsplit("_r", 1)
+            rows += [{**episode_row(benchmark, arm, cfg["arms"][arm], ep), "run": int(run)} for ep in read_jsonl(path)]
+    return pd.DataFrame(rows)
 
 
 def load_replay(cfg) -> pd.DataFrame:
@@ -263,6 +278,41 @@ def miss_difference(ua: pd.DataFrame, ub: pd.DataFrame, n_boot: int, seed: int =
             "lo": np.nanquantile(diffs, 0.025), "hi": np.nanquantile(diffs, 0.975)}
 
 
+def repeat_metrics(episodes, repeats, n_boot) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run-to-run variance. Run 1 is the arm's main run; each repeat runs the same cases again.
+
+    Returns per-run rates and, for every pair of runs, how often a case had the same outcome and the
+    paired change in attack success and in task success under attack.
+    """
+    if repeats.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    run_rows, pair_rows = [], []
+    for (benchmark, arm), rep in repeats.groupby(["benchmark", "arm"], sort=False):
+        main = episodes[(episodes["benchmark"] == benchmark) & (episodes["arm"] == arm)].assign(run=1)
+        runs = dict(tuple(pd.concat([main, rep]).groupby("run")))
+        for run, ep in runs.items():
+            att = ep[ep["attacked"]]
+            row = {"benchmark": benchmark, "arm": arm, "run": run, "workers": int(ep["workers"].max()),
+                   "episodes": len(ep), "errors": int(ep["error"].sum())}
+            for name, frame, col in [("BU", ep[~ep["attacked"]], "utility"), ("UA", att, "utility"),
+                                     ("ASR", att[att["delivered"]], "attack")]:
+                r = cluster_rate(frame, col, n_boot)
+                row.update({name: r["rate"], f"{name}_lo": r["lo"], f"{name}_hi": r["hi"],
+                            f"{name}_k/n": f"{r['k']}/{r['n']}"})
+            run_rows.append(row)
+        for first, second in itertools.combinations(sorted(runs), 2):
+            a, b = runs[first], runs[second]
+            m = a.merge(b, on="case_id", suffixes=("_1", "_2"))
+            asr = paired_contrast(b[b["attacked"] & b["delivered"]], a[a["attacked"] & a["delivered"]], "attack", n_boot)
+            ua = paired_contrast(b[b["attacked"]], a[a["attacked"]], "utility", n_boot)
+            pair_rows.append({
+                "benchmark": benchmark, "arm": arm, "runs": f"{second} vs {first}", "cases": len(m),
+                "same_outcome": ((m["utility_1"] == m["utility_2"]) & (m["attack_1"] == m["attack_2"])).mean(),
+                "ASR_diff": asr["diff"], "ASR_diff_lo": asr["lo"], "ASR_diff_hi": asr["hi"], "ASR_diff_p": asr["p"],
+                "UA_diff": ua["diff"], "UA_diff_lo": ua["lo"], "UA_diff_hi": ua["hi"], "UA_diff_p": ua["p"]})
+    return pd.DataFrame(run_rows), pd.DataFrame(pair_rows)
+
+
 def sep_metrics(sep, n_boot) -> pd.DataFrame:
     rows = []
     for agent, s in sep.groupby("agent"):
@@ -358,7 +408,7 @@ def ci(r, name) -> str:
     return f"{pct(r[name])} [{pct(r[name + '_lo'])}, {pct(r[name + '_hi'])}]"
 
 
-def write_summary(out: Path, metrics, contrast_df, inter, replay_df, decomp, sep_df):
+def write_summary(out: Path, metrics, contrast_df, inter, replay_df, decomp, sep_df, repeat_runs, repeat_pairs):
     lines = ["# Phase results (generated)", ""]
     if not metrics.empty:
         lines += ["## Arms", "", "Rates in %, 95% CI from resampling user tasks.", "",
@@ -406,6 +456,19 @@ def write_summary(out: Path, metrics, contrast_df, inter, replay_df, decomp, sep
         for _, r in sep_df.iterrows():
             lines.append(f"| {r.agent} | {r['items']} | {pct(r.witness_with_probe)} | {pct(r.witness_without_probe)} | "
                          f"{pct(r.manipulated)} | [{pct(r.lo)}, {pct(r.hi)}] |")
+    if not repeat_runs.empty:
+        lines += ["", "## Repeat runs (run-to-run variance)", "", "Run 1 is the main run.", "",
+                  "| Benchmark | Arm | Run | Episodes at once | Episodes | BU | UA | ASR |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for _, r in repeat_runs.iterrows():
+            lines.append(f"| {r.benchmark} | {r.arm} | {r.run} | {r.workers} | {r.episodes} | {ci(r, 'BU')} | "
+                         f"{ci(r, 'UA')} | {ci(r, 'ASR')} |")
+        lines += ["", "| Benchmark | Arm | Runs | Cases | Same outcome | ASR change | 95% CI | p | UA change | 95% CI | p |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|"]
+        for _, r in repeat_pairs.iterrows():
+            lines.append(f"| {r.benchmark} | {r.arm} | {r.runs} | {r.cases} | {pct(r.same_outcome)} | {pct(r.ASR_diff)} | "
+                         f"[{pct(r.ASR_diff_lo)}, {pct(r.ASR_diff_hi)}] | {r.ASR_diff_p:.3g} | {pct(r.UA_diff)} | "
+                         f"[{pct(r.UA_diff_lo)}, {pct(r.UA_diff_hi)}] | {r.UA_diff_p:.3g} |")
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -432,6 +495,7 @@ def main():
         inter[(benchmark, "A,B,C,D (restricted)")] = interaction(ep, {"A": (0, 0), "B": (1, 0), "C": (0, 1), "D": (1, 1)})
     replay_df, decomp = replay_metrics(load_replay(cfg), episodes, cfg, args.n_boot)
     sep_df = sep_metrics(load_sep(cfg), args.n_boot) if (cfg.results_dir / "sep").exists() else pd.DataFrame()
+    repeat_runs, repeat_pairs = repeat_metrics(episodes, load_repeats(cfg), args.n_boot)
 
     metrics.to_csv(out / "metrics.csv", index=False)
     contrast_df.to_csv(out / "contrasts.csv", index=False)
@@ -439,9 +503,11 @@ def main():
     replay_df.to_csv(out / "replay_guards.csv", index=False)
     decomp.to_csv(out / "decomposition.csv", index=False)
     sep_df.to_csv(out / "sep.csv", index=False)
+    repeat_runs.to_csv(out / "repeat_runs.csv", index=False)
+    repeat_pairs.to_csv(out / "repeat_pairs.csv", index=False)
     plot_security_utility(metrics[metrics["UA"].notna() & metrics["ASR"].notna()], cfg, out)
     plot_decomposition(decomp, out)
-    write_summary(out, metrics, contrast_df, inter, replay_df, decomp, sep_df)
+    write_summary(out, metrics, contrast_df, inter, replay_df, decomp, sep_df, repeat_runs, repeat_pairs)
     print(f"wrote {out}")
 
 

@@ -3,8 +3,10 @@
     python -m hijack.run --config configs/phase1.yaml --arm A --benchmark agentdojo
     python -m hijack.run --config configs/phase1.yaml --arm F --benchmark agentdyn --suites shopping --limit 5
     python -m hijack.run --config configs/phase1.yaml --sep --agent reta
+    python -m hijack.run --config configs/phase1.yaml --arm A --benchmark agentdojo --repeat 2
 
-Output: <results_dir>/<benchmark>/<arm>.jsonl, one line per episode. Re-running resumes.
+Output: <results_dir>/<benchmark>/<arm>.jsonl, one line per episode; a repeat run N (2, 3, ...) of the
+same cases goes to <results_dir>/<benchmark>/repeats/<arm>_r<N>.jsonl. Re-running resumes.
 """
 
 import argparse
@@ -111,10 +113,11 @@ def suite_cases(suite, suite_name, attack, limit, clean_only, done) -> list[tupl
 
 
 def run_arm(cfg, arm: str, benchmark: str, suites: list[str] | None, limit: int | None, clean_only: bool,
-            workers: int | None = None):
+            workers: int | None = None, repeat: int | None = None):
     # Progent keeps per-run state in its pipeline, so that arm always runs one episode at a time.
     workers = 1 if cfg.arm(arm).get("defense") else (workers or cfg.get("parallel", {}).get("live", 1))
-    out_path = cfg.results_dir / benchmark / f"{arm}.jsonl"
+    name = f"repeats/{arm}_r{repeat}" if repeat else arm
+    out_path = cfg.results_dir / benchmark / f"{name}.jsonl"
     done = done_keys(out_path)
     all_suites = get_suites(cfg["benchmark_version"])
     for suite_name in suites or cfg["benchmarks"][benchmark]:
@@ -133,7 +136,7 @@ def run_arm(cfg, arm: str, benchmark: str, suites: list[str] | None, limit: int 
                 "user_task": user_task.ID, "injection_task": injection_task.ID if injection_task else None,
                 "attack": cfg["attack"] if injection_task else None, "bucket": bucket(suite_name, user_task.ID),
                 "prompt": user_task.PROMPT, "injections": injections,
-                "trusted": cfg.trusted_constants(suite_name), "workers": workers,
+                "trusted": cfg.trusted_constants(suite_name), "workers": workers, "repeat": repeat or 1,
             })
             return run_episode(suite, local.pipeline, local.recorder, user_task, injection_task, injections)
 
@@ -162,6 +165,8 @@ def run_sep(cfg, agent_name: str, workers: int | None = None):
     workers = workers or cfg.get("parallel", {}).get("sep", 1)
     out_path = cfg.results_dir / "sep" / f"{agent_name}.jsonl"
     done = done_keys(out_path)
+    if len(done) >= cfg["sep"]["n_items"]:
+        return  # already complete: no need to fetch the dataset again
     agent = build_agent(cfg, agent_name)
     system_message = load_system_message(None)
     items = [(f"sep/{i}", item) for i, item in enumerate(load_sep(cfg)) if f"sep/{i}" not in done]
@@ -191,13 +196,16 @@ def main():
     parser.add_argument("--sep", action="store_true", help="run the SEP answer-manipulation probe")
     parser.add_argument("--agent", help="agent for --sep")
     parser.add_argument("--workers", type=int, help="episodes run at once (default: config parallel)")
+    parser.add_argument("--repeat", type=int, help="repeat run number (2, 3, ...) for run-to-run variance")
     args = parser.parse_args()
+    if args.repeat is not None and args.repeat < 2:
+        parser.error("--repeat starts at 2 (run 1 is the main run)")
 
     cfg = load_config(args.config)
     if args.sep:
         run_sep(cfg, args.agent, args.workers)
     else:
-        run_arm(cfg, args.arm, args.benchmark, args.suites, args.limit, args.clean_only, args.workers)
+        run_arm(cfg, args.arm, args.benchmark, args.suites, args.limit, args.clean_only, args.workers, args.repeat)
 
 
 if __name__ == "__main__":
