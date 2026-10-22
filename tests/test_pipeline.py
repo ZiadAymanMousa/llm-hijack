@@ -160,7 +160,8 @@ def test_run_arm_writes_and_resumes(cfg, fake_servers, tmp_path, monkeypatch):
     path = tmp_path / "agentdojo" / "A.jsonl"
     first = read_jsonl(path)
     assert len(first) == 1 + len(get_suites("v1.2.2")["banking"].injection_tasks)
-    assert first[0]["injection_task"] is None and first[0]["bucket"] == "param-open"
+    clean = [r for r in first if r["injection_task"] is None]  # episodes finish in any order
+    assert len(clean) == 1 and clean[0]["bucket"] == "param-open"
     run_arm(cfg, "A", "agentdojo", ["banking"], limit=1, clean_only=False)
     assert len(read_jsonl(path)) == len(first)  # nothing re-run
 
